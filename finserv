@@ -1,0 +1,247 @@
+#!/usr/bin/env bash
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+set -eou pipefail
+IFS=$'\n\t'
+
+SELF_COMMAND="$0"
+
+ANYCONNECT_CONTEXT="${XDG_CACHE_HOME:-$HOME/.fincloud}/anyconnect"
+
+anyconnect_connect() {
+  osascript << EOF
+tell application "Cisco AnyConnect Secure Mobility Client"
+	activate
+end tell
+repeat until application "Cisco AnyConnect Secure Mobility Client" is running
+	delay 0.1
+end repeat
+tell application "System Events"
+	repeat until (window 1 of process "Cisco AnyConnect Secure Mobility Client" exists)
+		delay 0.1
+	end repeat
+	
+	tell process "Cisco AnyConnect Secure Mobility Client"
+		keystroke "m" using command down
+	end tell
+	
+	tell process "Cisco AnyConnect Secure Mobility Client"
+		keystroke "a" using command down
+		keystroke "${1}"
+	end tell
+end tell
+tell application "System Events"
+  key code 36
+end tell
+EOF
+}
+
+anyconnect_login() {
+  osascript << EOF
+tell application "Cisco AnyConnect Secure Mobility Client"
+	activate
+end tell
+repeat until application "Cisco AnyConnect Secure Mobility Client" is running
+	delay 0.1
+end repeat
+tell application "System Events"
+  repeat until (window 2 of process "Cisco AnyConnect Secure Mobility Client" exists)
+		delay 0.1
+	end repeat
+
+  delay 0.3
+
+	tell process "Cisco AnyConnect Secure Mobility Client"
+    keystroke tab
+    delay 0.1
+		keystroke "a" using command down
+    keystroke "${1}"
+    delay 0.1
+    keystroke tab
+    delay 0.1
+    keystroke "a" using command down
+    keystroke "${2}"
+	end tell
+end tell
+tell application "System Events"
+  key code 36
+end tell
+EOF
+}
+
+anyconnect_twofactor() {
+  osascript << EOF
+tell application "Cisco AnyConnect Secure Mobility Client"
+	activate
+end tell
+repeat until application "Cisco AnyConnect Secure Mobility Client" is running
+	delay 0.1
+end repeat
+tell application "System Events"
+  repeat until (window 2 of process "Cisco AnyConnect Secure Mobility Client" exists)
+		delay 0.1
+	end repeat
+
+  delay 0.3
+
+	tell process "Cisco AnyConnect Secure Mobility Client"
+    keystroke "${1}"
+	end tell
+end tell
+tell application "System Events"
+  key code 36
+end tell
+EOF
+}
+
+read_twofactor() {
+  local message twofactor
+  now=$(sqlite3 ~/Library/Messages/chat.db "select datetime('now', 'localtime')")
+
+  while true ; do
+    message=$(sqlite3 ~/Library/Messages/chat.db \
+      "SELECT text, id as handle \
+      FROM message LEFT OUTER JOIN handle ON message.handle_id = handle.ROWID \
+      WHERE strftime('%s', \"${now}\") < strftime('%s', datetime((message.date/1000000000) + strftime('%s', '2001-01-01 00:00:00'), 'unixepoch', 'localtime')) AND id == '15445876'")
+    if [[ ! -z ${message} ]]; then
+      twofactor=$(echo \"${message}\" | grep -o '\[[0-9]\{6\}]' | sed 's/[^0-9]//g')
+      echo ${twofactor}
+      break
+    fi
+    sleep 1
+  done
+}
+
+get_server() {
+  jq -r ".server[] | select(.vpn_name==\"${1}\") | .vpn_server" ~/.fincloud/fincloud.cfg
+}
+
+get_id() {
+  jq -r ".server[] | select(.vpn_name==\"${1}\") | .id" ~/.fincloud/fincloud.cfg
+}
+
+connect() {
+  vpn_server=$(get_server ${1})
+  anyconnect_connect "${vpn_server}"
+
+  id=$(get_id ${1})
+  pw=$(security 2>&1 >/dev/null find-generic-password -ga "${1}" \
+  | ruby -e 'print $1 if STDIN.gets =~ /^password: "(.*)"$/')
+  anyconnect_login "${id}" "${pw}"
+
+  digit=$(read_twofactor)
+  anyconnect_twofactor "${digit}"
+}
+
+disconnect() {
+  /opt/cisco/anyconnect/bin/vpn disconnect >/dev/null
+}
+
+select_server() {
+  local choice
+  choice="$(FZF_DEFAULT_COMMAND="${SELF_COMMAND}" fzf --ansi --no-preview || true)"
+  if [[ -z "${choice}" ]]; then
+    exit 1
+  else
+    current="$(read_context)"
+    if [[ ${current} == ${choice} ]]; then
+      disconnect
+      save_context ""
+    elif [[ ${current} == "" ]]; then
+      connect "${choice}"
+      save_context "${choice}"
+    else
+      disconnect
+      connect "${choice}"
+      save_context "${choice}"
+    fi
+  fi
+}
+
+get_list() {
+  jq -r ".server[].vpn_name" ~/.fincloud/fincloud.cfg
+}
+
+anyconnect_server_list() {
+  list=$(get_list)
+  current="$(read_context)"
+
+  local yellow darkbg normal
+  yellow=$(tput setaf 3 || true)
+  darkbg=$(tput setab 0 || true)
+  normal=$(tput sgr0 || true) 
+
+  local fg bg
+  fg=${yellow}
+  bg=${darkbg}
+
+  for n in $list; do
+    if [[ "${n}" == "${current}" ]]; then
+      echo "${bg}${fg}${n}${normal}"
+    else
+      echo "${n}"
+    fi
+  done
+}
+
+usage() {
+cat << EOF
+USAGE:
+  finserv              : list the fincloud server sslvpn information
+  finserv -c, --help   : show the current connected server sslvpn using anyconnect
+  finserv -h, --help   : show this message
+EOF
+}
+
+read_context() {
+  if [[ -f "${ANYCONNECT_CONTEXT}" ]]; then
+    cat "${ANYCONNECT_CONTEXT}"
+  fi
+}
+
+save_context() {
+  local saved
+  saved="$(read_context)"
+
+  if [[ "${saved}" != "${1}" ]]; then
+    printf %s "${1}" > "${ANYCONNECT_CONTEXT}"
+  fi
+}
+
+error_message() {
+  echo >&2 "${1}"
+  exit 1
+}
+
+main() {
+  if [[ "$#" -eq 0 ]]; then
+    if [[ -t 1 ]]; then
+      select_server
+    else
+      anyconnect_server_list
+    fi
+  elif [[ "$#" -eq 1 ]]; then
+    if [[ "${1}" == '-h' || "${1}" == '--help' ]]; then
+      usage
+    elif [[ "${1}" == '-c' || "${1}" == '--current' ]]; then
+      if [[ ! -z "$(read_context)" ]]; then
+        echo "$(read_context)"
+      fi
+    fi
+  else
+    exit 1
+  fi
+}
+
+main "$@"
