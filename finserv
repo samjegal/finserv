@@ -63,7 +63,7 @@ tell application "System Events"
   delay 0.3
 
 	tell process "Cisco AnyConnect Secure Mobility Client"
-    keystroke tab
+    keystroke tab using shift down
     delay 0.1
 		keystroke "a" using command down
     keystroke "${1}"
@@ -113,7 +113,7 @@ read_twofactor() {
     message=$(sqlite3 ~/Library/Messages/chat.db \
       "SELECT text, id as handle \
       FROM message LEFT OUTER JOIN handle ON message.handle_id = handle.ROWID \
-      WHERE strftime('%s', \"${now}\") < strftime('%s', datetime((message.date/1000000000) + strftime('%s', '2001-01-01 00:00:00'), 'unixepoch', 'localtime')) AND id == '15445876'")
+      WHERE strftime('%s', \"${now}\") < strftime('%s', datetime((message.date/1000000000) + strftime('%s', '2001-01-01 00:00:00'), 'unixepoch', 'localtime')) AND (id == '15445876' OR id == '+8215445876')")
     if [[ ! -z ${message} ]]; then
       twofactor=$(echo \"${message}\" | grep -o '\[[0-9]\{6\}]' | sed 's/[^0-9]//g')
       echo ${twofactor}
